@@ -16,31 +16,28 @@
 
 package com.google.cloud.spanner;
 
-import static com.google.common.base.Preconditions.checkState;
-
 import com.google.api.gax.grpc.GrpcStatusCode;
 import com.google.api.gax.rpc.DeadlineExceededException;
+import com.google.api.gax.rpc.InternalException;
 import com.google.api.gax.rpc.ServerStream;
 import com.google.api.gax.rpc.UnavailableException;
 import com.google.cloud.spanner.SessionImpl.SessionTransaction;
 import com.google.cloud.spanner.spi.v1.SpannerRpc;
 import com.google.common.base.Stopwatch;
 import com.google.protobuf.ByteString;
-import com.google.spanner.v1.BeginTransactionRequest;
-import com.google.spanner.v1.ExecuteSqlRequest;
+import com.google.spanner.v1.*;
 import com.google.spanner.v1.ExecuteSqlRequest.QueryMode;
-import com.google.spanner.v1.PartialResultSet;
-import com.google.spanner.v1.Transaction;
-import com.google.spanner.v1.TransactionOptions;
-import com.google.spanner.v1.TransactionSelector;
 import io.grpc.Status.Code;
 import io.opencensus.trace.Span;
+import org.threeten.bp.Duration;
+import org.threeten.bp.temporal.ChronoUnit;
+
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.threeten.bp.Duration;
-import org.threeten.bp.temporal.ChronoUnit;
+
+import static com.google.common.base.Preconditions.checkState;
 
 /** Partitioned DML transaction for bulk updates and deletes. */
 class PartitionedDMLTransaction implements SessionTransaction {
@@ -127,20 +124,24 @@ class PartitionedDMLTransaction implements SessionTransaction {
                 }
               }
               break;
-            } catch (UnavailableException e) {
-              // Retry the stream in the same transaction if the stream breaks with
-              // UnavailableException and we have a resume token. Otherwise, we just retry the
-              // entire transaction.
-              if (!ByteString.EMPTY.equals(resumeToken)) {
-                log.log(
-                    Level.FINER,
-                    "Retrying PartitionedDml stream using resume token '"
-                        + resumeToken.toStringUtf8()
-                        + "' because of broken stream",
-                    e);
+            } catch (UnavailableException | InternalException e) {
+              if (isUnavailableException(e) || isEosException(e)) {
+                // Retry the stream in the same transaction if the stream breaks with
+                // UnavailableException or EOS InternalException and we have a resume token.
+                // Otherwise, we just retry the entire transaction.
+                if (!ByteString.EMPTY.equals(resumeToken)) {
+                  log.log(
+                      Level.FINER,
+                      "Retrying PartitionedDml stream using resume token '"
+                          + resumeToken.toStringUtf8()
+                          + "' because of broken stream",
+                      e);
+                } else {
+                  throw new com.google.api.gax.rpc.AbortedException(
+                      e, GrpcStatusCode.of(Code.ABORTED), true);
+                }
               } else {
-                throw new com.google.api.gax.rpc.AbortedException(
-                    e, GrpcStatusCode.of(Code.ABORTED), true);
+                throw e;
               }
             }
           }
@@ -174,4 +175,12 @@ class PartitionedDMLTransaction implements SessionTransaction {
   // No-op method needed to implement SessionTransaction interface.
   @Override
   public void setSpan(Span span) {}
+
+  private boolean isEosException(Exception e) {
+    return e.getMessage().contains("Received unexpected EOS on DATA frame from server");
+  }
+
+  private boolean isUnavailableException(Exception e) {
+    return e instanceof UnavailableException;
+  }
 }

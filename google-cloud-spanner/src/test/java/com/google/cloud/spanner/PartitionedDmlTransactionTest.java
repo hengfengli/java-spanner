@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 
 import com.google.api.gax.grpc.GrpcStatusCode;
 import com.google.api.gax.rpc.AbortedException;
+import com.google.api.gax.rpc.InternalException;
 import com.google.api.gax.rpc.ServerStream;
 import com.google.api.gax.rpc.UnavailableException;
 import com.google.cloud.spanner.spi.v1.SpannerRpc;
@@ -293,6 +294,87 @@ public class PartitionedDmlTransactionTest {
       verify(rpc, times(9))
           .executeStreamingPartitionedDml(
               Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+    }
+  }
+
+  @Test
+  public void testExecuteStreamingPartitionedUpdateUnexpectedEOS() {
+    ResultSetStats stats = ResultSetStats.newBuilder().setRowCountLowerBound(1000L).build();
+    PartialResultSet p1 = PartialResultSet.newBuilder().setResumeToken(resumeToken).build();
+    PartialResultSet p2 = PartialResultSet.newBuilder().setStats(stats).build();
+    ServerStream<PartialResultSet> stream1 = mock(ServerStream.class);
+    Iterator<PartialResultSet> iterator = mock(Iterator.class);
+    when(iterator.hasNext()).thenReturn(true, true, false);
+    when(iterator.next())
+        .thenReturn(p1)
+        .thenThrow(new InternalException(
+            "INTERNAL: Received unexpected EOS on DATA frame from server.",
+            null,
+            GrpcStatusCode.of(Code.INTERNAL),
+            false
+        ));
+    when(stream1.iterator()).thenReturn(iterator);
+    ServerStream<PartialResultSet> stream2 = mock(ServerStream.class);
+    when(stream2.iterator()).thenReturn(ImmutableList.of(p1, p2).iterator());
+    when(rpc.executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        .thenReturn(stream1);
+    when(rpc.executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)))
+        .thenReturn(stream2);
+
+    PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
+    long count = tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
+
+    assertThat(count).isEqualTo(1000L);
+    verify(rpc).beginTransaction(any(BeginTransactionRequest.class), anyMap());
+    verify(rpc).executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+    );
+    verify(rpc).executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)
+    );
+  }
+
+  @Test
+  public void testExecuteStreamingPartitionedUpdateGenericInternalException() {
+    ResultSetStats stats = ResultSetStats.newBuilder().setRowCountLowerBound(1000L).build();
+    PartialResultSet p1 = PartialResultSet.newBuilder().setResumeToken(resumeToken).build();
+    PartialResultSet p2 = PartialResultSet.newBuilder().setStats(stats).build();
+    ServerStream<PartialResultSet> stream1 = mock(ServerStream.class);
+    Iterator<PartialResultSet> iterator = mock(Iterator.class);
+    when(iterator.hasNext()).thenReturn(true, true, false);
+    when(iterator.next())
+        .thenReturn(p1)
+        .thenThrow(new InternalException(
+            "Error",
+            null,
+            GrpcStatusCode.of(Code.INTERNAL),
+            false
+        ));
+    when(stream1.iterator()).thenReturn(iterator);
+    ServerStream<PartialResultSet> stream2 = mock(ServerStream.class);
+    when(stream2.iterator()).thenReturn(ImmutableList.of(p1, p2).iterator());
+    when(rpc.executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        .thenReturn(stream1);
+    when(rpc.executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)))
+        .thenReturn(stream2);
+
+    try {
+      PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
+      tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
+      fail("missing expected INTERNAL exception");
+    } catch (SpannerException e) {
+      assertThat(e.getErrorCode()).isEqualTo(ErrorCode.INTERNAL);
+      // It should start a transaction exactly 10 times (10 ticks == 10 minutes).
+      verify(rpc, times(1)).beginTransaction(any(BeginTransactionRequest.class), anyMap());
+      // The last transaction should timeout before it starts the actual statement execution, which
+      // means that the execute method is only executed 9 times.
+      verify(rpc, times(1)).executeStreamingPartitionedDml(
+          Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+      );
     }
   }
 }
