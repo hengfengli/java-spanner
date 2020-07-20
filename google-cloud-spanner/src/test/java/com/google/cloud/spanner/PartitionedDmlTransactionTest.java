@@ -16,36 +16,18 @@
 
 package com.google.cloud.spanner;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyMap;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
 import com.google.api.gax.grpc.GrpcStatusCode;
 import com.google.api.gax.rpc.AbortedException;
 import com.google.api.gax.rpc.InternalException;
 import com.google.api.gax.rpc.ServerStream;
 import com.google.api.gax.rpc.UnavailableException;
 import com.google.cloud.spanner.spi.v1.SpannerRpc;
-import com.google.common.base.Stopwatch;
 import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.ByteString;
-import com.google.spanner.v1.BeginTransactionRequest;
-import com.google.spanner.v1.ExecuteSqlRequest;
+import com.google.spanner.v1.*;
 import com.google.spanner.v1.ExecuteSqlRequest.QueryMode;
-import com.google.spanner.v1.PartialResultSet;
-import com.google.spanner.v1.ResultSetStats;
-import com.google.spanner.v1.Transaction;
-import com.google.spanner.v1.TransactionSelector;
 import io.grpc.Status.Code;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.concurrent.TimeUnit;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -57,6 +39,16 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.threeten.bp.Duration;
 
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.concurrent.TimeUnit;
+
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyMap;
+import static org.mockito.Mockito.*;
+
 @SuppressWarnings("unchecked")
 @RunWith(JUnit4.class)
 public class PartitionedDmlTransactionTest {
@@ -64,6 +56,10 @@ public class PartitionedDmlTransactionTest {
   @Mock private SpannerRpc rpc;
 
   @Mock private SessionImpl session;
+
+  @Mock private Ticker ticker;
+
+  private PartitionedDmlTransaction tx;
 
   private final String sessionId = "projects/p/instances/i/databases/d/sessions/s";
   private final ByteString txId = ByteString.copyFromUtf8("tx");
@@ -86,6 +82,8 @@ public class PartitionedDmlTransactionTest {
     when(session.getOptions()).thenReturn(Collections.EMPTY_MAP);
     when(rpc.beginTransaction(any(BeginTransactionRequest.class), anyMap()))
         .thenReturn(Transaction.newBuilder().setId(txId).build());
+
+    tx = new PartitionedDmlTransaction(session, rpc, ticker);
   }
 
   @Test
@@ -96,16 +94,18 @@ public class PartitionedDmlTransactionTest {
     ServerStream<PartialResultSet> stream = mock(ServerStream.class);
     when(stream.iterator()).thenReturn(ImmutableList.of(p1, p2).iterator());
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
-        .thenReturn(stream);
+        Mockito.eq(executeRequestWithoutResumeToken),
+        anyMap(),
+        any(Duration.class))
+    ).thenReturn(stream);
 
-    PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
     long count = tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
+
     assertThat(count).isEqualTo(1000L);
     verify(rpc).beginTransaction(any(BeginTransactionRequest.class), anyMap());
-    verify(rpc)
-        .executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+    verify(rpc).executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+    );
   }
 
   @Test
@@ -118,23 +118,24 @@ public class PartitionedDmlTransactionTest {
     when(iterator.hasNext()).thenReturn(true, true, false);
     when(iterator.next())
         .thenReturn(p1)
-        .thenThrow(
-            new AbortedException(
-                "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true));
+        .thenThrow(new AbortedException(
+            "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true
+        ));
     when(stream1.iterator()).thenReturn(iterator);
     ServerStream<PartialResultSet> stream2 = mock(ServerStream.class);
     when(stream2.iterator()).thenReturn(ImmutableList.of(p1, p2).iterator());
     when(rpc.executeStreamingPartitionedDml(
-            any(ExecuteSqlRequest.class), anyMap(), any(Duration.class)))
+        any(ExecuteSqlRequest.class), anyMap(), any(Duration.class)))
         .thenReturn(stream1, stream2);
 
-    PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
     long count = tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
+
     assertThat(count).isEqualTo(1000L);
     verify(rpc, times(2)).beginTransaction(any(BeginTransactionRequest.class), anyMap());
     verify(rpc, times(2))
         .executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+        );
   }
 
   @Test
@@ -147,29 +148,29 @@ public class PartitionedDmlTransactionTest {
     when(iterator.hasNext()).thenReturn(true, true, false);
     when(iterator.next())
         .thenReturn(p1)
-        .thenThrow(
-            new UnavailableException(
-                "temporary unavailable", null, GrpcStatusCode.of(Code.UNAVAILABLE), true));
+        .thenThrow(new UnavailableException(
+            "temporary unavailable", null, GrpcStatusCode.of(Code.UNAVAILABLE), true
+        ));
     when(stream1.iterator()).thenReturn(iterator);
     ServerStream<PartialResultSet> stream2 = mock(ServerStream.class);
     when(stream2.iterator()).thenReturn(ImmutableList.of(p1, p2).iterator());
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream1);
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)))
+        Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream2);
 
-    PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
     long count = tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
+
     assertThat(count).isEqualTo(1000L);
     verify(rpc).beginTransaction(any(BeginTransactionRequest.class), anyMap());
-    verify(rpc)
-        .executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
-    verify(rpc)
-        .executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class));
+    verify(rpc).executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+    );
+    verify(rpc).executeStreamingPartitionedDml(
+        Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)
+    );
   }
 
   @Test
@@ -180,33 +181,25 @@ public class PartitionedDmlTransactionTest {
     when(iterator.hasNext()).thenReturn(true, true, false);
     when(iterator.next())
         .thenReturn(p1)
-        .thenThrow(
-            new UnavailableException(
-                "temporary unavailable", null, GrpcStatusCode.of(Code.UNAVAILABLE), true));
+        .thenThrow(new UnavailableException(
+            "temporary unavailable", null, GrpcStatusCode.of(Code.UNAVAILABLE), true)
+        );
     when(stream1.iterator()).thenReturn(iterator);
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream1);
+    when(ticker.read())
+        .thenReturn(0L, 1L, TimeUnit.NANOSECONDS.convert(10L, TimeUnit.MINUTES));
 
-    PartitionedDMLTransaction tx =
-        new PartitionedDMLTransaction(session, rpc) {
-          @Override
-          Stopwatch createStopwatchStarted() {
-            Ticker ticker = mock(Ticker.class);
-            when(ticker.read())
-                .thenReturn(0L, 1L, TimeUnit.NANOSECONDS.convert(10L, TimeUnit.MINUTES));
-            return Stopwatch.createStarted(ticker);
-          }
-        };
     try {
       tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
       fail("missing expected DEADLINE_EXCEEDED exception");
     } catch (SpannerException e) {
       assertThat(e.getErrorCode()).isEqualTo(ErrorCode.DEADLINE_EXCEEDED);
       verify(rpc).beginTransaction(any(BeginTransactionRequest.class), anyMap());
-      verify(rpc)
-          .executeStreamingPartitionedDml(
-              Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+      verify(rpc).executeStreamingPartitionedDml(
+          Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+      );
     }
   }
 
@@ -218,33 +211,25 @@ public class PartitionedDmlTransactionTest {
     when(iterator.hasNext()).thenReturn(true, true, false);
     when(iterator.next())
         .thenReturn(p1)
-        .thenThrow(
-            new AbortedException(
-                "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true));
+        .thenThrow(new AbortedException(
+            "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true)
+        );
     when(stream1.iterator()).thenReturn(iterator);
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream1);
+    when(ticker.read())
+        .thenReturn(0L, 1L, TimeUnit.NANOSECONDS.convert(10L, TimeUnit.MINUTES));
 
-    PartitionedDMLTransaction tx =
-        new PartitionedDMLTransaction(session, rpc) {
-          @Override
-          Stopwatch createStopwatchStarted() {
-            Ticker ticker = mock(Ticker.class);
-            when(ticker.read())
-                .thenReturn(0L, 1L, TimeUnit.NANOSECONDS.convert(10L, TimeUnit.MINUTES));
-            return Stopwatch.createStarted(ticker);
-          }
-        };
     try {
       tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
       fail("missing expected DEADLINE_EXCEEDED exception");
     } catch (SpannerException e) {
       assertThat(e.getErrorCode()).isEqualTo(ErrorCode.DEADLINE_EXCEEDED);
       verify(rpc, times(2)).beginTransaction(any(BeginTransactionRequest.class), anyMap());
-      verify(rpc)
-          .executeStreamingPartitionedDml(
-              Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+      verify(rpc).executeStreamingPartitionedDml(
+          Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+      );
     }
   }
 
@@ -256,32 +241,24 @@ public class PartitionedDmlTransactionTest {
     when(iterator.hasNext()).thenReturn(true);
     when(iterator.next())
         .thenReturn(p1)
-        .thenThrow(
-            new AbortedException(
-                "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true));
+        .thenThrow(new AbortedException(
+            "transaction aborted", null, GrpcStatusCode.of(Code.ABORTED), true
+        ));
     when(stream1.iterator()).thenReturn(iterator);
     when(rpc.executeStreamingPartitionedDml(
-            Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
+        Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream1);
+    when(ticker.read())
+        .thenAnswer(
+            new Answer<Long>() {
+              long ticks = 0L;
+              @Override
+              public Long answer(InvocationOnMock invocation) throws Throwable {
+                return TimeUnit.NANOSECONDS.convert(++ticks, TimeUnit.MINUTES);
+              }
+            }
+        );
 
-    PartitionedDMLTransaction tx =
-        new PartitionedDMLTransaction(session, rpc) {
-          long ticks = 0L;
-
-          @Override
-          Stopwatch createStopwatchStarted() {
-            Ticker ticker = mock(Ticker.class);
-            when(ticker.read())
-                .thenAnswer(
-                    new Answer<Long>() {
-                      @Override
-                      public Long answer(InvocationOnMock invocation) throws Throwable {
-                        return TimeUnit.NANOSECONDS.convert(++ticks, TimeUnit.MINUTES);
-                      }
-                    });
-            return Stopwatch.createStarted(ticker);
-          }
-        };
     try {
       tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
       fail("missing expected DEADLINE_EXCEEDED exception");
@@ -291,9 +268,9 @@ public class PartitionedDmlTransactionTest {
       verify(rpc, times(10)).beginTransaction(any(BeginTransactionRequest.class), anyMap());
       // The last transaction should timeout before it starts the actual statement execution, which
       // means that the execute method is only executed 9 times.
-      verify(rpc, times(9))
-          .executeStreamingPartitionedDml(
-              Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class));
+      verify(rpc, times(9)).executeStreamingPartitionedDml(
+          Mockito.eq(executeRequestWithoutResumeToken), anyMap(), any(Duration.class)
+      );
     }
   }
 
@@ -323,7 +300,6 @@ public class PartitionedDmlTransactionTest {
         Mockito.eq(executeRequestWithResumeToken), anyMap(), any(Duration.class)))
         .thenReturn(stream2);
 
-    PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
     long count = tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
 
     assertThat(count).isEqualTo(1000L);
@@ -363,7 +339,6 @@ public class PartitionedDmlTransactionTest {
         .thenReturn(stream2);
 
     try {
-      PartitionedDMLTransaction tx = new PartitionedDMLTransaction(session, rpc);
       tx.executeStreamingPartitionedUpdate(Statement.of(sql), Duration.ofMinutes(10));
       fail("missing expected INTERNAL exception");
     } catch (SpannerException e) {
